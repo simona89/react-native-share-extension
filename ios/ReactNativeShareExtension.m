@@ -36,7 +36,7 @@ RCT_EXPORT_MODULE();
 }
 
 
-RCT_EXPORT_METHOD(close) {
+RCT_EXPORT_METHOD(close:(NSString *)appGroupId) {
     [self cleanUpTempFiles:appGroupId];
     [extensionContext completeRequestReturningItems:nil
                                   completionHandler:nil];
