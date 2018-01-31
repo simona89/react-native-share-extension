@@ -8,6 +8,14 @@ import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.content.ContentUris;
 import android.os.Environment;
+import java.lang.Object;
+import java.io.*;
+import java.net.URI;
+
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.widget.ImageView;
+import com.facebook.react.bridge.ReactContextBaseJavaModule;
 
 public class RealPathUtil {
  public static String getRealPathFromURI(final Context context, final Uri uri) {
@@ -66,8 +74,9 @@ public class RealPathUtil {
          // Return the remote address
          if (isGooglePhotosUri(uri))
              return uri.getLastPathSegment();
-
-         return getDataColumn(context, uri, null, null);
+          
+         String path=getDataColumn(context, uri, null, null);     
+         return copyFile(uri,context,path);
      }
      // File
      else if ("file".equalsIgnoreCase(uri.getScheme())) {
@@ -142,5 +151,48 @@ public class RealPathUtil {
  public static boolean isGooglePhotosUri(Uri uri) {
      return "com.google.android.apps.photos.content".equals(uri.getAuthority());
  }
+ 
+ public static String copyFile(Uri uri, Context context,String path) {
 
+    String outputPath = context.getApplicationInfo().dataDir + "/sharedTemp/";
+    String inputFile = path.substring(path.lastIndexOf('/')+1);
+    try {
+        String data="";
+        InputStream input = context.getContentResolver().openInputStream(uri);
+        if ( input != null ) {
+            InputStreamReader inputStreamReader = new InputStreamReader(input);
+            BufferedReader bufferedReader = new BufferedReader(inputStreamReader);
+            String receiveString = "";
+            StringBuilder stringBuilder = new StringBuilder();
+
+            while ( (receiveString = bufferedReader.readLine()) != null ) {
+                stringBuilder.append(receiveString);
+            }
+            data= stringBuilder.toString();
+            input.close();
+        }
+        File dir = new File(outputPath);
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        File file = new File(outputPath, inputFile);
+
+        FileOutputStream stream = new FileOutputStream(file);
+        try {
+            stream.write(data.getBytes());
+        } finally {
+            stream.close();
+        }
+    }
+    catch (FileNotFoundException e){
+        throw new Error();
+    }
+    catch (IOException e){
+        throw new Error();
+    }
+    catch (Error e){
+        throw new Error();
+    }
+    return(outputPath+inputFile);
+  }
 }
