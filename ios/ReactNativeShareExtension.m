@@ -37,6 +37,7 @@ RCT_EXPORT_MODULE();
 
 
 RCT_EXPORT_METHOD(close) {
+    [self cleanUpTempFiles:appGroupId];
     [extensionContext completeRequestReturningItems:nil
                                   completionHandler:nil];
 }
@@ -44,102 +45,161 @@ RCT_EXPORT_METHOD(close) {
 
 
 RCT_REMAP_METHOD(data,
+                 appGroupId: (NSString *)appGroupId
                  resolver:(RCTPromiseResolveBlock)resolve
                  rejecter:(RCTPromiseRejectBlock)reject)
 {
-    [self extractDataFromContext: extensionContext withCallback:^(NSString* val, NSString* contentType, NSException* err) {
-        if(err) {
-            reject(@"error", err.description, nil);
-        } else {
-            resolve(@{
-                      @"type": contentType,
-                      @"value": val
-                      });
+    [self extractDataFromContext: extensionContext withAppGroup:appGroupId andCallback:^(NSArray* items ,NSException* err) {
+        if (items == nil) {
+            resolve(nil);
+            return;
         }
+        resolve(items[0]);
     }];
 }
 
-- (void)extractDataFromContext:(NSExtensionContext *)context withCallback:(void(^)(NSString *value, NSString* contentType, NSException *exception))callback {
-    
+RCT_REMAP_METHOD(dataMulti,
+                 appGroupId: (NSString *)appGroupId
+                 resolverMulti:(RCTPromiseResolveBlock)resolve
+                 rejecterMulti:(RCTPromiseRejectBlock)reject)
+{
+    [self extractDataFromContext: extensionContext withAppGroup: appGroupId andCallback:^(NSArray* items ,NSException* err) {
+        resolve(items);
+    }];
+}
+
+typedef void (^ProviderCallback)(NSString *content, NSString *contentType, BOOL owner, NSException *exception);
+
+- (void)extractDataFromContext:(NSExtensionContext *)context withAppGroup:(NSString *) appGroupId andCallback:(void(^)(NSArray *items ,NSException *exception))callback {
     @try {
         NSExtensionItem *item = [context.inputItems firstObject];
         NSArray *attachments = item.attachments;
-
-        __block NSItemProvider *urlProvider = nil;
-        __block NSItemProvider *imageProvider = nil;
-        __block NSItemProvider *textProvider = nil;
-
-        [attachments enumerateObjectsUsingBlock:^(NSItemProvider *provider, NSUInteger idx, BOOL *stop) {
-            if([provider hasItemConformingToTypeIdentifier:URL_IDENTIFIER]) {
-                urlProvider = provider;
-                *stop = YES;
-            } else if ([provider hasItemConformingToTypeIdentifier:TEXT_IDENTIFIER]){
-                textProvider = provider;
-                *stop = YES;
-            } else if ([provider hasItemConformingToTypeIdentifier:IMAGE_IDENTIFIER]){
-                imageProvider = provider;
-                *stop = YES;
+        NSMutableArray *items = [[NSMutableArray alloc] init];
+        
+        __block int attachmentIdx = 0;
+        __block ProviderCallback providerCb = nil;
+        providerCb = ^ void (NSString *content, NSString *contentType, BOOL owner, NSException *exception) {
+            if (exception) {
+                callback(nil, exception);
+                return;
             }
-        }];
-
-        if(urlProvider) {
-            [urlProvider loadItemForTypeIdentifier:URL_IDENTIFIER options:nil completionHandler:^(id<NSSecureCoding> item, NSError *error) {
-                NSURL *url = (NSURL *)item;
-
-                if(callback) {
-                    callback([url absoluteString], @"text/plain", nil);
-                }
-            }];
-        } else if (imageProvider) {
-            [imageProvider loadItemForTypeIdentifier:IMAGE_IDENTIFIER options:nil completionHandler:^(id<NSSecureCoding> item, NSError *error) {
-                
-                /**
-                 * Save the image to NSTemporaryDirectory(), which cleans itself tri-daily.
-                 * This is necessary as the iOS 11 screenshot editor gives us a UIImage, while
-                 * sharing from Photos and similar apps gives us a URL
-                 * Therefore the solution is to save a UIImage, either way, and return the local path to that temp UIImage
-                 * This path will be sent to React Native and can be processed and accessed RN side.
-                **/
-                
-                UIImage *sharedImage;
-                NSString *filePath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"RNSE_TEMP_IMG"];
-                NSString *fullPath = [filePath stringByAppendingPathExtension:@"png"];
-                
-                if ([(NSObject *)item isKindOfClass:[UIImage class]]){
-                    sharedImage = (UIImage *)item;
-                }else if ([(NSObject *)item isKindOfClass:[NSURL class]]){
-                    NSURL* url = (NSURL *)item;
-                    NSData *data = [NSData dataWithContentsOfURL:url];
-                    sharedImage = [UIImage imageWithData:data];
-                }
-                
-                [UIImagePNGRepresentation(sharedImage) writeToFile:fullPath atomically:YES];
-                
-                if(callback) {
-                    callback(fullPath, [fullPath pathExtension], nil);
-                }
-            }];
-        } else if (textProvider) {
-            [textProvider loadItemForTypeIdentifier:TEXT_IDENTIFIER options:nil completionHandler:^(id<NSSecureCoding> item, NSError *error) {
-                NSString *text = (NSString *)item;
-
-                if(callback) {
-                    callback(text, @"text/plain", nil);
-                }
-            }];
-        } else {
-            if(callback) {
-                callback(nil, nil, [NSException exceptionWithName:@"Error" reason:@"couldn't find provider" userInfo:nil]);
+            
+            if (content != nil) {
+                [items addObject:@{
+                                   @"type": contentType,
+                                   @"value": content,
+                                   @"owner": [NSNumber numberWithBool:owner],
+                                   }];
             }
-        }
+            
+            ++attachmentIdx;
+            if (attachmentIdx == [attachments count]) {
+                callback(items, nil);
+            } else {
+                [self extractDataFromProvider:attachments[attachmentIdx] withAppGroup:appGroupId andCallback: providerCb];
+            }
+        };
+        [self extractDataFromProvider:attachments[0] withAppGroup:appGroupId andCallback: providerCb];
     }
     @catch (NSException *exception) {
-        if(callback) {
-            callback(nil, nil, exception);
-        }
+        callback(nil,exception);
     }
 }
 
+- (void)extractDataFromProvider:(NSItemProvider *)provider withAppGroup:(NSString *) appGroupId andCallback:(void(^)(NSString* content, NSString* contentType, BOOL owner, NSException *exception))callback {
+    
+    NSURL *tempContainerURL = [ReactNativeShareExtension tempContainerURL:appGroupId];
+    
+    if([provider hasItemConformingToTypeIdentifier:@"public.image"]) {
+        [provider loadItemForTypeIdentifier:@"public.image" options:nil completionHandler:^(id<NSSecureCoding, NSObject> item, NSError *error) {
+            if (error) {
+                callback(nil, nil, NO, error);
+                return;
+            }
+            
+            if (tempContainerURL == nil){
+                return callback(nil, nil, NO, nil);
+            }
+            
+            NSInteger index = [[(NSURL *)item absoluteString] rangeOfString:@"/" options:NSBackwardsSearch].location;
+            NSString *fileName = [[(NSURL *)item absoluteString] substringFromIndex:index+1];
+            
+            NSURL *tempFileURL = [tempContainerURL URLByAppendingPathComponent: fileName];
+            NSData *data = [NSData dataWithContentsOfURL:[NSURL URLWithString:[(NSURL *)item absoluteString]]];
+            
+            BOOL created = [data writeToFile:[tempFileURL path] atomically:YES];
+            if (created) {
+                return callback([tempFileURL absoluteString], @"public.image", YES, nil);
+            } else {
+                return callback(nil, nil, NO, nil);
+            }
+        }];
+        return;
+    }
+    
+    if([provider hasItemConformingToTypeIdentifier:@"public.url"]) {
+        [provider loadItemForTypeIdentifier:@"public.url" options:nil completionHandler:^(id<NSSecureCoding, NSObject> item, NSError *error) {
+            if (error) {
+                callback(nil, nil, NO, error);
+                return;
+            }
+            
+            if (tempContainerURL == nil){
+                return callback(nil, nil, NO, nil);
+            }
+            
+            NSInteger index = [[(NSURL *)item absoluteString] rangeOfString:@"/" options:NSBackwardsSearch].location;
+            NSString *fileName = [[(NSURL *)item absoluteString] substringFromIndex:index+1];
+            
+            NSURL *tempFileURL = [tempContainerURL URLByAppendingPathComponent: fileName];
+            NSData *data = [NSData dataWithContentsOfURL:[NSURL URLWithString:[(NSURL *)item absoluteString]]];
+            
+            BOOL created = [data writeToFile:[tempFileURL path] atomically:YES];
+            if (created) {
+                return callback([tempFileURL absoluteString], @"public.url", YES, nil);
+            } else {
+                return callback(nil, nil, NO, nil);
+            }
+        }];
+        return;
+    }
 
+    callback(nil, nil, NO, nil);
+}
+
++ (NSURL*) tempContainerURL: (NSString*)appGroupId {
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSURL *containerURL = [manager containerURLForSecurityApplicationGroupIdentifier: appGroupId];
+    NSURL *tempDirectoryURL = [containerURL URLByAppendingPathComponent:@"shareTempItems"];
+    if (![manager fileExistsAtPath:[tempDirectoryURL path]]) {
+        NSError *err;
+        [manager createDirectoryAtURL:tempDirectoryURL withIntermediateDirectories:YES attributes:nil error:&err];
+        if (err) {
+            return nil;
+        }
+    }
+    
+    return tempDirectoryURL;
+}
+
+- (void) cleanUpTempFiles:(NSString *)appGroupId {
+    NSURL *tmpDirectoryURL = [ReactNativeShareExtension tempContainerURL:appGroupId];
+    if (tmpDirectoryURL == nil) {
+        return;
+    }
+    
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSError *error;
+    NSArray *tmpFiles = [fileManager contentsOfDirectoryAtPath:[tmpDirectoryURL path] error:&error];
+    if (error) {
+        return;
+    }
+    
+    for (NSString *file in tmpFiles)
+    {
+        error = nil;
+        [fileManager removeItemAtPath:[[tmpDirectoryURL URLByAppendingPathComponent:file] path] error:&error];
+    }
+}
 
 @end
